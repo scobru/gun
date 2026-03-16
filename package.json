@@ -13,8 +13,9 @@
     "https": "HTTPS_KEY=test/https/server.key HTTPS_CERT=test/https/server.crt npm start",
     "build": "node lib/unbuild.js & npm run minify",
     "prepublishOnly": "npm run build",
-    "test": "echo 'Did you run PANIC holy-grail, 1~X, on-recover, etc.?' && mocha",
-    "testSea": "mocha test/sea/sea.js",
+    "clean": "node -e \"['radata','data'].forEach(function(d){try{require('fs').rmSync(d,{recursive:true,force:true})}catch(e){}})\"",
+    "test": "npm run clean && echo 'Did you run PANIC holy-grail, 1~X, on-recover, etc.?' && mocha",
+    "testSea": "npm run clean && mocha test/sea/sea.js",
     "e2e": "mocha e2e/distributed.js",
     "docker": "hooks/build",
     "minify": "uglifyjs gun.js -o gun.min.js -c -m",
@@ -61,16 +62,16 @@
     "directory": "types"
   },
   "dependencies": {
-    "ws": "^7.2.1"
+    "ws": "^7.5.10"
   },
   "optionalDependencies": {
-    "@peculiar/webcrypto": "^1.1.1"
+    "@peculiar/webcrypto": "^1.5.0"
   },
   "devDependencies": {
-    "mocha": "^6.2.0",
-    "ip": "^1.1.5",
     "aws-sdk": "^2.528.0",
     "emailjs": "^2.2.0",
+    "ip": "^1.1.5",
+    "mocha": "^6.2.0",
     "uglify-js": "^3.6.0"
   }
 }

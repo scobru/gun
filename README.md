@@ -107,6 +107,8 @@ This fork includes **powerful enterprise-grade features** that significantly ext
 - 🌳 **[Additive Key Derivation](./docs/additive-derivation.md)** - Hierarchical deterministic (HD) wallets and privacy-enhanced identities  
 - 🔐 **[WebAuthn Integration](./docs/webauthn.md)** - Hardware security keys, Touch ID, Face ID, and passkey support
 - 🎯 **[External Authenticators](./docs/external-authenticators.md)** - Stateless operations with custom signing backends (HSM, KMS, etc.)
+- 🗂️ **[Tilde Shard Index](./docs/tilde-shard.md)** - SEA-enforced write rules for a sharded public-key discovery index
+- 🔧 **[`globalThis` Web Worker Compat](./docs/globalthis-worker-compat.md)** - All `lib/` modules now run inside Web Workers, Service Workers, and Node.js without `window`
 
 **📖 [Read the complete documentation →](./docs/)**
 
@@ -199,6 +201,7 @@ Technically, **GUN is a graph synchronization protocol** with a *lightweight emb
 - **[Additive Derivation](./docs/additive-derivation.md)** - HD wallets & key derivation  
 - **[WebAuthn Integration](./docs/webauthn.md)** - Hardware authenticators & biometrics
 - **[External Authenticators](./docs/external-authenticators.md)** - Custom signing & stateless auth
+- **[`globalThis` Web Worker Compat](./docs/globalthis-worker-compat.md)** - Run GUN inside Workers, no `window` required
 
 ### 📚 Core Documentation
 

@@ -2,6 +2,7 @@
 
     var SEA = require('./root');
     var shim = require('./shim');
+    var b62 = SEA.base62;
     var s = {};
     s.pbkdf2 = {hash: {name : 'SHA-256'}, iter: 100000, ks: 64};
     s.ecdsa = {
@@ -12,11 +13,12 @@
 
     // This creates Web Cryptography API compliant JWK for sign/verify purposes
     s.jwk = function(pub, d){  // d === priv
-      pub = pub.split('.');
-      var x = pub[0], y = pub[1];
+      var xy = b62.pubToJwkXY(pub); // handles old (87-char x.y) and new (88-char base62)
+      var x = xy.x, y = xy.y;
       var jwk = {kty: "EC", crv: "P-256", x: x, y: y, ext: true};
       jwk.key_ops = d ? ['sign'] : ['verify'];
-      if(d){ jwk.d = d }
+      // Convert base62 priv (44-char) back to base64url for WebCrypto JWK importKey
+      if(d){ jwk.d = (d.length === 44 && /^[A-Za-z0-9]{44}$/.test(d)) ? b62.b62ToB64(d) : d }
       return jwk;
     };
 

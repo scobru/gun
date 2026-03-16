@@ -3,6 +3,7 @@
     var SEA = require('./root');
     var shim = require('./shim');
     var S = require('./settings');
+    var b62 = SEA.base62;
     // Derive shared secret from other's pub and my epub/epriv 
     SEA.secret = SEA.secret || (async (key, pair, cb, opt) => { try {
       opt = opt || {};
@@ -36,10 +37,12 @@
     }});
 
     // can this be replaced with settings.jwk?
-    var keysToEcdhJwk = (pub, d) => { // d === priv
-      //var [ x, y ] = shim.Buffer.from(pub, 'base64').toString('utf8').split(':') // old
-      var [ x, y ] = pub.split('.') // new
-      var jwk = d ? { d: d } : {}
+    var keysToEcdhJwk = (pub, d) => { // d === epriv
+      var xy = b62.pubToJwkXY(pub) // handles old (87) and new (88) format
+      var x = xy.x, y = xy.y
+      // Convert base62 epriv (44-char) back to base64url for WebCrypto JWK importKey
+      var dJwk = d ? ((d.length === 44 && /^[A-Za-z0-9]{44}$/.test(d)) ? b62.b62ToB64(d) : d) : undefined
+      var jwk = dJwk ? { d: dJwk } : {}
       return [  // Use with spread returned value...
         'jwk',
         Object.assign(

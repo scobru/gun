@@ -46,13 +46,33 @@
   })(USE, './https');
 
   ;USE(function(module){
-    var u;
-    if(u+''== typeof btoa){
-      if(u+'' == typeof Buffer){
-        try{ global.Buffer = USE("buffer", 1).Buffer }catch(e){ console.log("Please `npm install buffer` or add it to your package.json !") }
+    var u, root = (typeof globalThis !== "undefined") ? globalThis : (typeof global !== "undefined" ? global : (typeof window !== "undefined" ? window : this));
+    var native = {}
+    native.btoa = (u+'' != typeof root.btoa) && root.btoa;
+    native.atob = (u+'' != typeof root.atob) && root.atob;
+    if(u+'' == typeof Buffer){
+      if(u+'' != typeof require){
+        try{ root.Buffer = USE("buffer", 1).Buffer }catch(e){ console.log("Please `npm install buffer` or add it to your package.json !") }
       }
-      global.btoa = function(data){ return Buffer.from(data, "binary").toString("base64") };
-      global.atob = function(data){ return Buffer.from(data, "base64").toString("binary") };
+    }
+    if(u+'' != typeof Buffer){
+      root.btoa = function(data){ return Buffer.from(data, "binary").toString("base64").replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');};
+      root.atob = function(data){
+        var tmp = data.replace(/-/g, '+').replace(/_/g, '/')
+        while(tmp.length % 4){ tmp += '=' }
+        return Buffer.from(tmp, "base64").toString("binary");
+      };
+      return;
+    }
+    if(native.btoa){
+      root.btoa = function(data){ return native.btoa(data).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); };
+    }
+    if(native.atob){
+      root.atob = function(data){
+        var tmp = data.replace(/-/g, '+').replace(/_/g, '/')
+        while(tmp.length % 4){ tmp += '=' }
+        return native.atob(tmp);
+      };
     }
   })(USE, './base64');
 
@@ -213,6 +233,119 @@
   ;USE(function(module){
     var SEA = USE('./root');
     var shim = USE('./shim');
+
+    // Base62 alphabet: digits → uppercase → lowercase (62 chars, a-zA-Z0-9 only)
+    var ALPHA = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+    var ALPHA_MAP = {};
+    for (var i = 0; i < ALPHA.length; i++) { ALPHA_MAP[ALPHA[i]] = i; }
+
+    // Fixed output length for a 256-bit (32-byte) value in base62
+    // 62^44 > 2^256 ✓
+    var PUB_LEN = 44;
+
+    // BigInt → base62 string, zero-padded to PUB_LEN (44 chars)
+    function biToB62(n) {
+        if (typeof n !== 'bigint' || n < 0n) {
+            throw new Error('biToB62: input must be non-negative BigInt');
+        }
+        var s = '';
+        var v = n;
+        while (v > 0n) {
+            s = ALPHA[Number(v % 62n)] + s;
+            v = v / 62n;
+        }
+        while (s.length < PUB_LEN) { s = '0' + s; }
+        if (s.length > PUB_LEN) {
+            throw new Error('biToB62: value too large for ' + PUB_LEN + '-char base62');
+        }
+        return s;
+    }
+
+    // base62 string → BigInt (accepts exactly PUB_LEN chars)
+    function b62ToBI(s) {
+        if (typeof s !== 'string' || s.length !== PUB_LEN) {
+            throw new Error('b62ToBI: expected ' + PUB_LEN + '-char base62 string, got ' + (s && s.length));
+        }
+        if (!/^[A-Za-z0-9]+$/.test(s)) {
+            throw new Error('b62ToBI: invalid base62 characters');
+        }
+        var n = 0n;
+        for (var i = 0; i < s.length; i++) {
+            var c = ALPHA_MAP[s[i]];
+            if (c === undefined) { throw new Error('b62ToBI: unknown char ' + s[i]); }
+            n = n * 62n + BigInt(c);
+        }
+        return n;
+    }
+
+    // base64url string (43 chars, from JWK) → base62 (44 chars)
+    function b64ToB62(s) {
+        if (typeof s !== 'string' || !s) {
+            throw new Error('b64ToB62: input must be non-empty string');
+        }
+        var hex = shim.Buffer.from(atob(s), 'binary').toString('hex');
+        var n = BigInt('0x' + (hex || '0'));
+        return biToB62(n);
+    }
+
+    // base62 (44 chars) → base64url string (for JWK)
+    function b62ToB64(s) {
+        var n = b62ToBI(s);
+        var hex = n.toString(16).padStart(64, '0');
+        var b64 = shim.Buffer.from(hex, 'hex').toString('base64')
+            .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+        return b64;
+    }
+
+    // Parse pub (old or new format) → { x, y } as base64url strings (for JWK importKey)
+    // Old format: [43 base64url].[43 base64url]  length=87
+    // New format: [44 base62][44 base62]          length=88
+    function pubToJwkXY(pub) {
+        if (typeof pub !== 'string') {
+            throw new Error('pubToJwkXY: pub must be a string');
+        }
+        if (pub.length === 87 && pub[43] === '.') {
+            // Old base64url format
+            var parts = pub.split('.');
+            if (parts.length !== 2) { throw new Error('pubToJwkXY: invalid old pub format'); }
+            return { x: parts[0], y: parts[1] };
+        }
+        if (pub.length === 88 && /^[A-Za-z0-9]{88}$/.test(pub)) {
+            // New base62 format
+            return {
+                x: b62ToB64(pub.slice(0, 44)),
+                y: b62ToB64(pub.slice(44))
+            };
+        }
+        throw new Error('pubToJwkXY: unrecognised pub format (length=' + pub.length + ')');
+    }
+
+    // Encode arbitrary Buffer/Uint8Array as base62: chunks into 32-byte blocks, each → 44 chars
+    // e.g. SHA-256 (32B) → 44 chars, PBKDF2 (64B) → 88 chars
+    function bufToB62(buf) {
+        var out = '';
+        for (var i = 0; i < buf.length; i += 32) {
+            var end = Math.min(i + 32, buf.length);
+            var hex = '';
+            // left-pad short last chunk to 32 bytes
+            for (var p = 0; p < 32 - (end - i); p++) { hex += '00'; }
+            for (var j = i; j < end; j++) {
+                hex += ('0' + buf[j].toString(16)).slice(-2);
+            }
+            out += biToB62(BigInt('0x' + hex));
+        }
+        return out;
+    }
+
+    var b62 = { biToB62: biToB62, b62ToBI: b62ToBI, b64ToB62: b64ToB62, b62ToB64: b62ToB64, pubToJwkXY: pubToJwkXY, bufToB62: bufToB62, PUB_LEN: PUB_LEN };
+    SEA.base62 = b62;
+    module.exports = b62;
+  })(USE, './base62');
+
+  ;USE(function(module){
+    var SEA = USE('./root');
+    var shim = USE('./shim');
+    var b62 = SEA.base62;
     var s = {};
     s.pbkdf2 = {hash: {name : 'SHA-256'}, iter: 100000, ks: 64};
     s.ecdsa = {
@@ -223,11 +356,12 @@
 
     // This creates Web Cryptography API compliant JWK for sign/verify purposes
     s.jwk = function(pub, d){  // d === priv
-      pub = pub.split('.');
-      var x = pub[0], y = pub[1];
+      var xy = b62.pubToJwkXY(pub); // handles old (87-char x.y) and new (88-char base62)
+      var x = xy.x, y = xy.y;
       var jwk = {kty: "EC", crv: "P-256", x: x, y: y, ext: true};
       jwk.key_ops = d ? ['sign'] : ['verify'];
-      if(d){ jwk.d = d }
+      // Convert base62 priv (44-char) back to base64url for WebCrypto JWK importKey
+      if(d){ jwk.d = (d.length === 44 && /^[A-Za-z0-9]{44}$/.test(d)) ? b62.b62ToB64(d) : d }
       return jwk;
     };
 
@@ -283,6 +417,8 @@
     SEA.work = SEA.work || (async (data, pair, cb, opt) => { try { // used to be named `proof`
       var salt = (pair||{}).epub || pair; // epub not recommended, salt should be random!
       opt = opt || {};
+      var enc = opt.encode || 'base62';
+      var b62 = SEA.base62;
       if(salt instanceof Function){
         cb = salt;
         salt = u;
@@ -294,7 +430,8 @@
       }
       data = (typeof data == 'string') ? data : await shim.stringify(data);
       if('sha' === (opt.name||'').toLowerCase().slice(0,3)){
-        var rsha = shim.Buffer.from(await sha(data, opt.name), 'binary').toString(opt.encode || 'base64')
+        var rsha = shim.Buffer.from(await sha(data, opt.name), 'binary');
+        rsha = ('base62' === enc) ? b62.bufToB62(rsha) : ('base64' === enc) ? btoa(String.fromCharCode(...new Uint8Array(rsha))) : rsha.toString(enc);
         if(cb){ try{ cb(rsha) }catch(e){console.log(e)} }
         return rsha;
       }
@@ -309,7 +446,8 @@
         hash: opt.hash || S.pbkdf2.hash,
       }, key, opt.length || (S.pbkdf2.ks * 8))
       data = shim.random(data.length)  // Erase data in case of passphrase
-      var r = shim.Buffer.from(work, 'binary').toString(opt.encode || 'base64')
+      var r = shim.Buffer.from(work, 'binary');
+      r = ('base62' === enc) ? b62.bufToB62(r) : ('base64' === enc) ? btoa(String.fromCharCode(...new Uint8Array(r))) : r.toString(enc);
       if(cb){ try{ cb(r) }catch(e){console.log(e)} }
       return r;
     } catch(e) { 
@@ -326,6 +464,7 @@
   ;USE(function(module){
     var SEA = USE('./root');
     var shim = USE('./shim');
+    var b62 = SEA.base62;
 
     // P-256 curve constants
     const n = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
@@ -413,14 +552,12 @@
           throw new Error("Invalid base64 input: must be non-empty string");
         }
         // Standard base64url validation
-        const b64url = s.replace(/-/g, '+').replace(/_/g, '/');
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64url)) {
+        if (!/^[A-Za-z0-9_-]*={0,2}$/.test(s)) {
           throw new Error("Invalid base64 characters detected");
         }
 
         try {
-          const padded = b64url.padEnd(Math.ceil(b64url.length / 4) * 4, '=');
-          const hex = shim.Buffer.from(padded, 'base64').toString('hex');
+          const hex = shim.Buffer.from(atob(s), 'binary').toString('hex');
 
           // Validate result is within P-256 range (256 bits / 64 hex chars)
           if (hex.length > 64) {
@@ -433,6 +570,13 @@
           if (e.message.includes("256 bits")) throw e;
           throw new Error("Invalid base64 decoding: " + e.message);
         }
+      };
+      // privToBI: parse priv/epriv accepting both old 43-char base64url and new 44-char base62
+      const privToBI = s => {
+        if (typeof s === 'string' && s.length === 44 && /^[A-Za-z0-9]{44}$/.test(s)) {
+          return b62.b62ToBI(s);
+        }
+        return b64ToBI(s); // backward compat: old base64url 43-char
       };
       const biToB64 = n => {
         // Validate input is within valid range for P-256 (256 bits max)
@@ -458,17 +602,14 @@
         ensurePrivRange(priv, 'Private key');
         const pub = pointMult(priv, G);
         if (!isOnCurve(pub)) throw new Error("Invalid point generated");
-        return biToB64(pub.x) + '.' + biToB64(pub.y);
+        return b62.biToB62(pub.x) + b62.biToB62(pub.y);
       };
       const parsePub = pubStr => {
         if (!pubStr || typeof pubStr !== 'string') {
           throw new Error("Invalid pub format: must be string");
         }
-        const parts = pubStr.split('.');
-        if (parts.length !== 2) {
-          throw new Error("Invalid pub format: must be x.y");
-        }
-        const point = { x: b64ToBI(parts[0]), y: b64ToBI(parts[1]) };
+        const xy = b62.pubToJwkXY(pubStr); // handles both old (87) and new (88) format
+        const point = { x: b64ToBI(xy.x), y: b64ToBI(xy.y) };
         if (point.x >= P || point.y >= P) {
           throw new Error("Invalid public key: out of range");
         }
@@ -481,7 +622,7 @@
         if (!point || !isOnCurve(point)) {
           throw new Error("Invalid point: not on curve");
         }
-        return biToB64(point.x) + '.' + biToB64(point.y);
+        return b62.biToB62(point.x) + b62.biToB62(point.y);
       };
       const seedToBuffer = seed => {
         const enc = new shim.TextEncoder();
@@ -590,19 +731,19 @@
       if (opt.seed && (opt.priv || opt.epriv || opt.pub || opt.epub)) {
         r = {};
         if (opt.priv) {
-          const priv = ensurePrivRange(b64ToBI(opt.priv), 'Private key');
+          const priv = ensurePrivRange(privToBI(opt.priv), 'Private key');
           const signResult = await derivePrivWithRetry(priv, "SEA.DERIVE|sign|");
           const derivedPriv = signResult.derivedPriv;
           const derivedPub = pointMult(derivedPriv, G);
-          r.priv = biToB64(derivedPriv);
+          r.priv = b62.biToB62(derivedPriv);
           r.pub = pointToPub(derivedPub);
         }
         if (opt.epriv) {
-          const epriv = ensurePrivRange(b64ToBI(opt.epriv), 'Encryption private key');
+          const epriv = ensurePrivRange(privToBI(opt.epriv), 'Encryption private key');
           const encResult = await derivePrivWithRetry(epriv, "SEA.DERIVE|encrypt|");
           const derivedEpriv = encResult.derivedPriv;
           const derivedEpub = pointMult(derivedEpriv, G);
-          r.epriv = biToB64(derivedEpriv);
+          r.epriv = b62.biToB62(derivedEpriv);
           r.epub = pointToPub(derivedEpub);
         }
         if (opt.pub) {
@@ -616,36 +757,36 @@
           r.epub = pointToPub(derivedEpub);
         }
       } else if (opt.priv) {
-        const priv = ensurePrivRange(b64ToBI(opt.priv), 'Private key');
+        const priv = ensurePrivRange(privToBI(opt.priv), 'Private key');
         r = { priv: opt.priv, pub: pubFromPriv(priv) };
         if (opt.epriv) {
-          const epriv = ensurePrivRange(b64ToBI(opt.epriv), 'Encryption private key');
+          const epriv = ensurePrivRange(privToBI(opt.epriv), 'Encryption private key');
           r.epriv = opt.epriv;
           r.epub = pubFromPriv(epriv);
         } else {
           try {
             const dh = await ecdhSubtle.generateKey({name: 'ECDH', namedCurve: 'P-256'}, true, ['deriveKey'])
             .then(async k => ({ 
-              epriv: (await ecdhSubtle.exportKey('jwk', k.privateKey)).d,
-              epub: (await ecdhSubtle.exportKey('jwk', k.publicKey)).x + '.' + 
-                    (await ecdhSubtle.exportKey('jwk', k.publicKey)).y
+              epriv: b62.b64ToB62((await ecdhSubtle.exportKey('jwk', k.privateKey)).d),
+              epub: b62.b64ToB62((await ecdhSubtle.exportKey('jwk', k.publicKey)).x) +
+                    b62.b64ToB62((await ecdhSubtle.exportKey('jwk', k.publicKey)).y)
             }));
             r.epriv = dh.epriv; r.epub = dh.epub;
           } catch(e) {}
         }
       } else if (opt.epriv) {
-        const epriv = ensurePrivRange(b64ToBI(opt.epriv), 'Encryption private key');
+        const epriv = ensurePrivRange(privToBI(opt.epriv), 'Encryption private key');
         r = { epriv: opt.epriv, epub: pubFromPriv(epriv) };
         if (opt.priv) {
-          const priv = ensurePrivRange(b64ToBI(opt.priv), 'Private key');
+          const priv = ensurePrivRange(privToBI(opt.priv), 'Private key');
           r.priv = opt.priv;
           r.pub = pubFromPriv(priv);
         } else {
           const sa = await subtle.generateKey({name: 'ECDSA', namedCurve: 'P-256'}, true, ['sign', 'verify'])
           .then(async k => ({ 
-            priv: (await subtle.exportKey('jwk', k.privateKey)).d,
-            pub: (await subtle.exportKey('jwk', k.publicKey)).x + '.' + 
-                 (await subtle.exportKey('jwk', k.publicKey)).y
+            priv: b62.b64ToB62((await subtle.exportKey('jwk', k.privateKey)).d),
+            pub: b62.b64ToB62((await subtle.exportKey('jwk', k.publicKey)).x) +
+                 b62.b64ToB62((await subtle.exportKey('jwk', k.publicKey)).y)
           }));
           r.priv = sa.priv; r.pub = sa.pub;
         }
@@ -653,23 +794,23 @@
         const signPriv = await seedToKey(opt.seed, "-sign");
         const encPriv = await seedToKey(opt.seed, "-encrypt");
         r = {
-          priv: biToB64(signPriv), pub: pubFromPriv(signPriv),
-          epriv: biToB64(encPriv), epub: pubFromPriv(encPriv)
+          priv: b62.biToB62(signPriv), pub: pubFromPriv(signPriv),
+          epriv: b62.biToB62(encPriv), epub: pubFromPriv(encPriv)
         };
       } else {
         const sa = await subtle.generateKey({name: 'ECDSA', namedCurve: 'P-256'}, true, ['sign', 'verify'])
         .then(async k => ({ 
-          priv: (await subtle.exportKey('jwk', k.privateKey)).d,
-          pub: (await subtle.exportKey('jwk', k.publicKey)).x + '.' + 
-               (await subtle.exportKey('jwk', k.publicKey)).y
+          priv: b62.b64ToB62((await subtle.exportKey('jwk', k.privateKey)).d),
+          pub: b62.b64ToB62((await subtle.exportKey('jwk', k.publicKey)).x) +
+               b62.b64ToB62((await subtle.exportKey('jwk', k.publicKey)).y)
         }));
         r = { pub: sa.pub, priv: sa.priv };
         try {
           const dh = await ecdhSubtle.generateKey({name: 'ECDH', namedCurve: 'P-256'}, true, ['deriveKey'])
           .then(async k => ({ 
-            epriv: (await ecdhSubtle.exportKey('jwk', k.privateKey)).d,
-            epub: (await ecdhSubtle.exportKey('jwk', k.publicKey)).x + '.' + 
-                  (await ecdhSubtle.exportKey('jwk', k.publicKey)).y
+            epriv: b62.b64ToB62((await ecdhSubtle.exportKey('jwk', k.privateKey)).d),
+            epub: b62.b64ToB62((await ecdhSubtle.exportKey('jwk', k.publicKey)).x) +
+                  b62.b64ToB62((await ecdhSubtle.exportKey('jwk', k.publicKey)).y)
           }));
           r.epub = dh.epub; r.epriv = dh.epriv;
         } catch(e) {}
@@ -762,6 +903,7 @@
     var shim = USE('./shim');
     var S = USE('./settings');
     var sha = USE('./sha256');
+    var b62 = SEA.base62;
     var u;
 
     async function w(j, k, s) {
@@ -804,7 +946,8 @@
 
       o = o || {};
       var pub = p.pub || p;
-      var [x, y] = pub.split('.');
+      var xy = b62.pubToJwkXY(pub);
+      var x = xy.x, y = xy.y;
 
       try {
         var k = await (shim.ossl || shim.subtle).importKey('jwk', {
@@ -1014,6 +1157,7 @@
     var SEA = USE('./root');
     var shim = USE('./shim');
     var S = USE('./settings');
+    var b62 = SEA.base62;
     // Derive shared secret from other's pub and my epub/epriv 
     SEA.secret = SEA.secret || (async (key, pair, cb, opt) => { try {
       opt = opt || {};
@@ -1047,10 +1191,12 @@
     }});
 
     // can this be replaced with settings.jwk?
-    var keysToEcdhJwk = (pub, d) => { // d === priv
-      //var [ x, y ] = shim.Buffer.from(pub, 'base64').toString('utf8').split(':') // old
-      var [ x, y ] = pub.split('.') // new
-      var jwk = d ? { d: d } : {}
+    var keysToEcdhJwk = (pub, d) => { // d === epriv
+      var xy = b62.pubToJwkXY(pub) // handles old (87) and new (88) format
+      var x = xy.x, y = xy.y
+      // Convert base62 epriv (44-char) back to base64url for WebCrypto JWK importKey
+      var dJwk = d ? ((d.length === 44 && /^[A-Za-z0-9]{44}$/.test(d)) ? b62.b62ToB64(d) : d) : undefined
+      var jwk = dJwk ? { d: dJwk } : {}
       return [  // Use with spread returned value...
         'jwk',
         Object.assign(
@@ -1138,6 +1284,7 @@
 
   ;USE(function(module){
     var shim = USE('./shim');
+    var sha1hash = USE('./sha1');
     // Practical examples about usage found in tests.
     var SEA = USE('./root');
     SEA.work = USE('./work');
@@ -1162,10 +1309,10 @@
     // Calculate public key KeyID aka PGPv4 (result: 8 bytes as hex string)
     SEA.keyid = SEA.keyid || (async (pub) => {
       try {
-        // base64('base64(x):base64(y)') => shim.Buffer(xy)
+        // Decode pub key coordinates (handles old 87-char base64url and new 88-char base62)
+        var xy = SEA.base62.pubToJwkXY(pub);
         const pb = shim.Buffer.concat(
-          pub.replace(/-/g, '+').replace(/_/g, '/').split('.')
-          .map((t) => shim.Buffer.from(t, 'base64'))
+          [xy.x, xy.y].map((t) => shim.Buffer.from(atob(t.replace(/-/g,'+').replace(/_/g,'/')), 'binary'))
         )
         // id is PGPv4 compliant raw key
         const id = shim.Buffer.concat([
@@ -1386,6 +1533,7 @@
         if(u === get){
           if(act.name){ return act.err('Your user account is not published for dApps to access, please consider syncing it online, or allowing local access by adding your device as a peer.') }
           if(alias && retries--){
+            act.enc = u; act.legacy = false; act.base64 = false; // reset for retry
             root.get('~@'+alias).once(act.a);
             return;
           }
@@ -1395,18 +1543,43 @@
       }
       act.c = function(auth){
         if(u === auth){ return act.b() }
-        if('string' == typeof auth){ return act.c(obj_ify(auth)) } // in case of legacy
+        if('string' == typeof auth){
+          // SEA{...} format needs prefix-stripped parse; plain JSON handled by obj_ify
+          if('SEA{' === auth.slice(0,4)){
+            SEA.opt.parse(auth).then(function(env){ // env = {m: innerJSON, s: sig}
+              if(!env || !env.m){ return act.c(obj_ify(auth)) }
+              // env.m may be a string (bob) or array [soul, key, json, ts] (alice legacy [])
+              var payload = Array.isArray(env.m) ? env.m[2] : env.m;
+              act.c(obj_ify(payload)); // parse the inner {ek, s} payload
+            });
+            return;
+          }
+          return act.c(obj_ify(auth));
+        }
         SEA.work(pass, (act.auth = auth).s, act.d, act.enc); // the proof of work is evidence that we've spent some time/effort trying to log in, this slows brute force.
       }
       act.d = function(proof){
+        act.proof = proof;
         SEA.decrypt(act.auth.ek, proof, act.e, act.enc);
       }
       act.e = function(half){
         if(u === half){
-          if(!act.enc){ // try old format
+          if(!act.enc){ // try utf8 (common legacy format)
             act.enc = {encode: 'utf8'};
             return act.c(act.auth);
-          } act.enc = null; // end backwards
+          }
+          if(!act.base64){ // try base64url (old default pre-base62, shimmed btoa)
+            act.base64 = true; // use flag, not enc check — decrypt.js mutates enc.encode via fallback
+            act.enc = {encode: 'base64'};
+            return act.c(act.auth);
+          }
+          if(!act.legacy && act.proof){ // convert base64url proof -> standard base64 (pre-shim era, e.g. 2019 browser users)
+            act.legacy = true;
+            var tmp = act.proof.replace(/-/g, '+').replace(/_/g, '/');
+            while(tmp.length % 4){ tmp += '=' }
+            return SEA.decrypt(act.auth.ek, tmp, act.e, {encode: 'base64'}); // fresh opt: act.enc may be mutated by decrypt's internal fallback
+          }
+          act.enc = null; // end backwards
           return act.b();
         }
         act.half = half;
@@ -1738,6 +1911,9 @@
       if('~@' === soul.slice(0,2)){ // special case for shared system data, the list of public keys for an alias.
         check.pubs(eve, msg, val, key, soul, at, no); return;
       }
+      if('~' === soul || '~/' === soul.slice(0,2)){
+        check.shard(eve, msg, val, key, soul, at, no, at.user||''); return;
+      }
       //if('~' === soul.slice(0,1) && 2 === (tmp = soul.slice(1)).split('.').length){ // special case, account data for a public key.
       if(tmp = SEA.opt.pub(soul)){ // special case, account data for a public key.
         check.pub(eve, msg, val, key, soul, at, no, at.user||'', tmp); return;
@@ -1749,7 +1925,7 @@
       eve.to.next(msg); // not handled
     }
     // Verify content-addressed data matches its hash
-    check.hash = function (eve, msg, val, key, soul, at, no) {
+    check.hash = function (eve, msg, val, key, soul, at, no, yes) {
       function base64ToHex(data) {
         var binaryStr = atob(data);
         var a = [];
@@ -1760,9 +1936,11 @@
         return a.join("");
       }
       var hash = key.split('#').pop();
+      yes = yes || function(){ eve.to.next(msg) };
+      if(!hash || hash === key){ return yes() }
       SEA.work(val, null, function (b64hash) {
         var hexhash = base64ToHex(b64hash), b64slice = b64hash.slice(-20), hexslice = hexhash.slice(-20);
-        if ([b64hash, b64slice, hexhash, hexslice].some(item => item.endsWith(hash))) return eve.to.next(msg);
+        if ([b64hash, b64slice, hexhash, hexslice].some(item => item.endsWith(hash))) return yes();
         no("Data hash not same as hash!");
       }, { name: 'SHA-256' });
     }
@@ -1776,56 +1954,248 @@
       if(key === link_is(val)){ return eve.to.next(msg) } // and the ID must be EXACTLY equal to its property
       no("Alias not same!"); // that way nobody can tamper with the list of public keys.
     };
-    check.pub = async function(eve, msg, val, key, soul, at, no, user, pub){ var tmp // Example: {_:#~asdf, hello:'world'~fdsa}}
-      const verify = (certificate, certificant, cb) => {
-        if (certificate.m && certificate.s && certificant && pub)
-          // now verify certificate
-          return SEA.verify(certificate, pub, data => { // check if "pub" (of the graph owner) really issued this cert
-            if (u !== data && u !== data.e && msg.put['>'] && msg.put['>'] > parseFloat(data.e)) return no("Certificate expired.") // certificate expired
-            // "data.c" = a list of certificants/certified users
-            // "data.w" = lex WRITE permission, in the future, there will be "data.r" which means lex READ permission
-            if (u !== data && data.c && data.w && (data.c === certificant || data.c.indexOf('*') > -1 || data.c.indexOf(certificant) > -1)) {
-              // ok, now "certificant" is in the "certificants" list, but is "path" allowed? Check path
-              let path = soul.indexOf('/') > -1 ? soul.replace(soul.substring(0, soul.indexOf('/') + 1), '') : ''
-              String.match = String.match || Gun.text.match
-              const w = Array.isArray(data.w) ? data.w : typeof data.w === 'object' || typeof data.w === 'string' ? [data.w] : []
-              for (const lex of w) {
-                if ((String.match(path, lex['#']) && String.match(key, lex['.'])) || (!lex['.'] && String.match(path, lex['#'])) || (!lex['#'] && String.match(key, lex['.'])) || String.match((path ? path + '/' + key : key), lex['#'] || lex)) {
-                  // is Certificant forced to present in Path
-                  if (lex['+'] && lex['+'].indexOf('*') > -1 && path && path.indexOf(certificant) == -1 && key.indexOf(certificant) == -1) return no(`Path "${path}" or key "${key}" must contain string "${certificant}".`)
-                  // path is allowed, but is there any WRITE block? Check it out
-                  if (data.wb && (typeof data.wb === 'string' || ((data.wb || {})['#']))) { // "data.wb" = path to the WRITE block
-                    var root = eve.as.root.$.back(-1)
-                    if (typeof data.wb === 'string' && '~' !== data.wb.slice(0, 1)) root = root.get('~' + pub)
-                    return root.get(data.wb).get(certificant).once(value => { // TODO: INTENT TO DEPRECATE.
-                      if (value && (value === 1 || value === true)) return no(`Certificant ${certificant} blocked.`)
-                      return cb(data)
-                    })
-                  }
-                  return cb(data)
-                }
-              }
-              return no("Certificate verification fail.")
-            }
-          })
+    check.$sh = {
+      pub: 88,
+      cut: 2,
+      min: 1,
+      root: '~',
+      pre: '~/',
+      bad: /[^0-9a-zA-Z]/
+    }
+    check.$sh.max = Math.ceil(check.$sh.pub / check.$sh.cut)
+    check.$seg = function(seg, short){
+      if('string' != typeof seg || !seg){ return }
+      if(short){
+        if(seg.length < check.$sh.min || seg.length > check.$sh.cut){ return }
+      } else {
+        if(seg.length !== check.$sh.cut){ return }
+      }
+      if(check.$sh.bad.test(seg)){ return }
+      return 1
+    }
+    check.$path = function(soul){
+      if(check.$sh.root === soul){ return [] }
+      if(check.$sh.pre !== (soul||'').slice(0,2)){ return }
+      if('/' === soul.slice(-1) || 0 <= soul.indexOf('//')){ return }
+      var path = soul.slice(2).split('/'), i = 0, seg;
+      for(i; i < path.length; i++){
+        seg = path[i];
+        if(!check.$seg(seg)){ return }
+      }
+      return path
+    }
+    check.$kid = function(soul, key){
+      if(check.$sh.root === soul){ return check.$sh.pre + key }
+      return soul + '/' + key
+    }
+    check.$pub = function(soul, key){
+      var path = check.$path(soul);
+      if(!path){ return }
+      return path.join('') + key
+    }
+    check.$leaf = function(soul, key){
+      var pub = check.$pub(soul, key);
+      if(!pub || pub.length !== check.$sh.pub){ return }
+      if(SEA.opt.pub('~' + pub) !== pub){ return }
+      return pub
+    }
+    check.$sea = function(msg, user, pub){
+      var ctx = (msg._.msg || {}).opt || {}
+      var opt = msg._.sea || (function(){
+        var o = Object.assign({}, ctx)
+        try{
+          Object.defineProperty(msg._, 'sea', {value: o, enumerable: false, configurable: true, writable: true})
+        }catch(e){ msg._.sea = o }
+        return o
+      }())
+      var authenticator = opt.authenticator || (user._ || {}).sea
+      var upub = opt.authenticator ? (opt.pub || (user.is || {}).pub || pub) : (user.is || {}).pub
+      if (!msg._.done) {
+        delete ctx.authenticator; delete ctx.pub
+        msg._.done = true
+      }
+      return {opt, authenticator, upub}
+    }
+    check.shard = async function(eve, msg, val, key, soul, at, no, user){
+      var path = check.$path(soul), link = link_is(val), expected, leaf, raw, claim;
+      if(!path){ return no("Invalid shard soul path.") }
+      if(!check.$seg(key, 1)){ return no("Invalid shard key.") }
+      if((path.length + 1) > check.$sh.max){ return no("Invalid shard depth.") }
+      leaf = check.$leaf(soul, key)
+      if(leaf){
+        if(!link){ return no("Shard leaf value must be a link.") }
+        if(link !== '~' + leaf){ return no("Shard leaf link must point to ~pub.") }
+        // Always sign fresh — authenticator required; sig covers state, preventing pre-signed writes
+        var lsec = check.$sea(msg, user, leaf)
+        var lauthenticator = lsec.authenticator
+        var lupub = lsec.upub || (lauthenticator||{}).pub
+        if(!lauthenticator){ return no("Shard leaf requires authenticator.") }
+        if(lupub !== leaf){ return no("Shard leaf authenticator pub mismatch.") }
+        check.auth(msg, no, lauthenticator, function(data){
+          if(link_is(data) !== link){ return no("Shard leaf signed payload mismatch.") }
+          msg.put['='] = {'#': link}
+          check.next(eve, msg, no)
+        })
         return
       }
-
-      const next = () => {
-        JSON.stringifyAsync(msg.put[':'], function(err,s){
-          if(err){ return no(err || "Stringify error.") }
-          msg.put[':'] = s;
+      // Intermediate
+      expected = check.$kid(soul, key)
+      var prefix = check.$pub(soul, key)
+      raw = link ? {} : ((await S.parse(val)) || {})
+      claim = (raw && typeof raw === 'object') ? raw['*'] : undefined
+      if(!claim){
+        // Fresh client write — authenticator required; SEA.opt.pack binds sig to Gun state
+        if(!link){ return no("Shard intermediate value must be link.") }
+        if(link !== expected){ return no("Invalid shard link target.") }
+        var sec = check.$sea(msg, user)
+        var authenticator = sec.authenticator
+        claim = sec.upub || ((authenticator||{}).pub)
+        if(!authenticator){ return no("Shard intermediate requires authenticator.") }
+        if('string' !== typeof claim || claim.length !== check.$sh.pub){ return no("Invalid shard intermediate pub.") }
+        if(SEA.opt.pub('~' + claim) !== claim){ return no("Invalid shard intermediate pub format.") }
+        if(0 !== claim.indexOf(prefix)){ return no("Shard pub prefix mismatch.") }
+        check.auth(msg, no, authenticator, function(data){
+          if(link_is(data) !== expected){ return no("Shard intermediate signed payload mismatch.") }
+          msg.put[':']['*'] = claim  // append fullPub to {':':link,'~':sig} set by check.auth
+          msg.put['='] = {'#': expected}
+          check.next(eve, msg, no)
+        })
+        return
+      }
+      // Peer re-read: stored envelope {':': link, '~': sig, '*': fullPub}
+      // Skip if local graph already has a valid link for this slot — avoid redundant verify+write
+      var existing = ((at.graph||{})[soul]||{})[key]
+      if(existing){
+        var existingParsed = await S.parse(existing)
+        if(existingParsed && link_is(existingParsed[':']) === expected){
+          msg.put['='] = {'#': expected}
+          return eve.to.next(msg)
+        }
+      }
+      if('string' !== typeof claim || claim.length !== check.$sh.pub){ return no("Invalid shard intermediate pub.") }
+      if(SEA.opt.pub('~' + claim) !== claim){ return no("Invalid shard intermediate pub format.") }
+      if(0 !== claim.indexOf(prefix)){ return no("Shard pub prefix mismatch.") }
+      if(link_is(raw[':']) !== expected){ return no("Invalid shard link target.") }
+      SEA.opt.pack(msg.put, function(packed){
+        SEA.verify(packed, claim, function(data){
+          data = SEA.opt.unpack(data)
+          if(u === data){ return no("Invalid shard intermediate signature.") }
+          if(link_is(data) !== expected){ return no("Shard intermediate payload mismatch.") }
+          msg.put['='] = data
+          eve.to.next(msg)  // val already a JSON string — forward directly
+        })
+      })
+    };
+    check.$vfy = function(eve, msg, key, soul, pub, no, certificate, certificant, cb){
+      if (!(certificate||'').m || !(certificate||'').s || !certificant || !pub) { return }
+      return SEA.verify(certificate, pub, data => { // check if "pub" (of the graph owner) really issued this cert
+        if (u !== data && u !== data.e && msg.put['>'] && msg.put['>'] > parseFloat(data.e)) return no("Certificate expired.") // certificate expired
+        // "data.c" = a list of certificants/certified users
+        // "data.w" = lex WRITE permission, in the future, there will be "data.r" which means lex READ permission
+        if (u !== data && data.c && data.w && (data.c === certificant || data.c.indexOf('*') > -1 || data.c.indexOf(certificant) > -1)) {
+          // ok, now "certificant" is in the "certificants" list, but is "path" allowed? Check path
+          var path = soul.indexOf('/') > -1 ? soul.replace(soul.substring(0, soul.indexOf('/') + 1), '') : ''
+          String.match = String.match || Gun.text.match
+          var w = Array.isArray(data.w) ? data.w : typeof data.w === 'object' || typeof data.w === 'string' ? [data.w] : []
+          for (const lex of w) {
+            if ((String.match(path, lex['#']) && String.match(key, lex['.'])) || (!lex['.'] && String.match(path, lex['#'])) || (!lex['#'] && String.match(key, lex['.'])) || String.match((path ? path + '/' + key : key), lex['#'] || lex)) {
+              // is Certificant forced to present in Path
+              if (lex['+'] && lex['+'].indexOf('*') > -1 && path && path.indexOf(certificant) == -1 && key.indexOf(certificant) == -1) return no(`Path "${path}" or key "${key}" must contain string "${certificant}".`)
+              // path is allowed, but is there any WRITE block? Check it out
+              if (data.wb && (typeof data.wb === 'string' || ((data.wb || {})['#']))) { // "data.wb" = path to the WRITE block
+                var root = eve.as.root.$.back(-1)
+                if (typeof data.wb === 'string' && '~' !== data.wb.slice(0, 1)) root = root.get('~' + pub)
+                return root.get(data.wb).get(certificant).once(value => { // TODO: INTENT TO DEPRECATE.
+                  if (value && (value === 1 || value === true)) return no(`Certificant ${certificant} blocked.`)
+                  return cb(data)
+                })
+              }
+              return cb(data)
+            }
+          }
+          return no("Certificate verification fail.")
+        }
+      })
+    }
+    check.next = function(eve, msg, no){
+      JSON.stringifyAsync(msg.put[':'], function(err,s){
+        if(err){ return no(err || "Stringify error.") }
+        msg.put[':'] = s;
+        return eve.to.next(msg);
+      })
+    }
+    check.guard = function(eve, msg, key, soul, at, no, data, next){
+      if(0 > key.indexOf('#')){ return next() }
+      check.hash(eve, msg, data, key, soul, at, no, next)
+    }
+    check.auth = function(msg, no, authenticator, done){
+      SEA.opt.pack(msg.put, packed => {
+        if (!authenticator) return no("Missing authenticator");
+        SEA.sign(packed, authenticator, async function(data) {
+          if (u === data) return no(SEA.err || 'Signature fail.')
+          if (!data.m || !data.s) return no('Invalid signature format')
+          var parsed = SEA.opt.unpack(data.m)
+          msg.put[':'] = {':': parsed, '~': data.s}
+          msg.put['='] = parsed
+          done(parsed)
+        }, {raw: 1})
+      })
+    }
+    check.$tag = async function(msg, cert, upub, verify, next){
+      const _cert = await S.parse(cert)
+      if (_cert && _cert.m && _cert.s) verify(_cert, upub, _ => {
+        msg.put[':']['+'] = _cert // '+' is a certificate
+        msg.put[':']['*'] = upub // '*' is pub of the user who puts
+        next()
+        return
+      })
+    }
+    check.pass = function(eve, msg, raw, data, verify){
+      if (raw['+'] && raw['+']['m'] && raw['+']['s'] && raw['*']){
+        return verify(raw['+'], raw['*'], _ => {
+          msg.put['='] = data;
           return eve.to.next(msg);
         })
       }
+      msg.put['='] = data;
+      return eve.to.next(msg);
+    }
+    check.pub = async function(eve, msg, val, key, soul, at, no, user, pub, conf){ var tmp // Example: {_:#~asdf, hello:'world'~fdsa}}
+      conf = conf || {}
+      const verify = (certificate, certificant, cb) => check.$vfy(eve, msg, key, soul, pub, no, certificate, certificant, cb)
+      const $next = () => check.next(eve, msg, no)
 
-      // Localize some opt props, and delete the original refs to prevent possible attacks
-      const opt = (msg._.msg || {}).opt || {}
-      const authenticator = opt.authenticator || (user._ || {}).sea;
-      const upub = opt.authenticator ? (opt.pub || (user.is || {}).pub || pub) : (user.is || {}).pub;
-      const cert = opt.cert;
-      delete opt.authenticator; delete opt.pub;
+      // Localize auth options into message-private SEA context.
+      const sec = check.$sea(msg, user, pub)
+      const opt = sec.opt
+      const authenticator = sec.authenticator
+      const upub = sec.upub
+      const cert = conf.nocert ? u : opt.cert;
+      const $expect = function(data){
+        if(u === conf.want){ return 1 }
+        if(data === conf.want){ return 1 }
+        no(conf.err || "Unexpected payload.")
+      }
       const raw = await S.parse(val) || {}
+      const $hash = function(data, next){
+        check.guard(eve, msg, key, soul, at, no, data, next)
+      }
+      const $sign = async function(){
+        // if writing to own graph, just allow it
+        if (pub === upub) {
+          if (tmp = link_is(val)) (at.sea.own[tmp] = at.sea.own[tmp] || {})[pub] = 1
+          $next()
+          return
+        }
+
+        // if writing to other's graph, check if cert exists then try to inject cert into put, also inject self pub so that everyone can verify the put
+        if (pub !== upub && cert) {
+          return check.$tag(msg, cert, upub, verify, $next)
+        }
+      }
+      const $pass = function(data){
+        return check.pass(eve, msg, raw, data, verify)
+      }
 
       if ('pub' === key && '~' + pub === soul) {
         if (val === pub) return eve.to.next(msg) // the account MUST match `pub` property that equals the ID of the public key.
@@ -1833,37 +2203,9 @@
       }
 
       if ((user.is || authenticator) && upub && !raw['*'] && !raw['+'] && (pub === upub || (pub !== upub && cert))){
-        SEA.opt.pack(msg.put, packed => {
-          // Validate authenticator
-          if (!authenticator) return no("Missing authenticator");
-          SEA.sign(packed, authenticator, async function(data) {
-            if (u === data) return no(SEA.err || 'Signature fail.')
-            // Validate signature format
-            if (!data.m || !data.s) return no('Invalid signature format')
-
-            msg.put[':'] = {':': tmp = SEA.opt.unpack(data.m), '~': data.s}
-            msg.put['='] = tmp
-
-            // if writing to own graph, just allow it
-            if (pub === upub) {
-              if (tmp = link_is(val)) (at.sea.own[tmp] = at.sea.own[tmp] || {})[pub] = 1
-              next()
-              return
-            }
-
-            // if writing to other's graph, check if cert exists then try to inject cert into put, also inject self pub so that everyone can verify the put
-            if (pub !== upub && cert) {
-              const _cert = await S.parse(cert)
-              // even if cert exists, we must verify it
-              if (_cert && _cert.m && _cert.s)
-                verify(_cert, upub, _ => {
-                  msg.put[':']['+'] = _cert // '+' is a certificate
-                  msg.put[':']['*'] = upub // '*' is pub of the user who puts
-                  next()
-                  return
-                })
-            }
-          }, {raw: 1})
+        check.auth(msg, no, authenticator, function(data){
+          if(!$expect(data)){ return }
+          $hash(data, $sign)
         })
         return;
       }
@@ -1872,19 +2214,10 @@
         SEA.verify(packed, raw['*'] || pub, function(data){ var tmp;
           data = SEA.opt.unpack(data);
           if (u === data) return no("Unverified data.") // make sure the signature matches the account it claims to be on. // reject any updates that are signed with a mismatched account.
+          if(!$expect(data)){ return }
           if ((tmp = link_is(data)) && pub === SEA.opt.pub(tmp)) (at.sea.own[tmp] = at.sea.own[tmp] || {})[pub] = 1
 
-          // check if cert ('+') and putter's pub ('*') exist
-          if (raw['+'] && raw['+']['m'] && raw['+']['s'] && raw['*'])
-            // now verify certificate
-            verify(raw['+'], raw['*'], _ => {
-              msg.put['='] = data;
-              return eve.to.next(msg);
-            })
-          else {
-            msg.put['='] = data;
-            return eve.to.next(msg);
-          }
+          $hash(data, function(){ $pass(data) })
         });
       })
       return
@@ -1901,16 +2234,18 @@
 
     var valid = Gun.valid, link_is = function(d,l){ return 'string' == typeof (l = valid(d)) && l }, state_ify = (Gun.state||'').ify;
 
-    var pubcut = /[^\w_-]/; // anything not alphanumeric or _ -
+    var pubcut = /[^\w_-]/; // kept for old-format parsing below
     SEA.opt.pub = function(s){
       if(!s){ return }
-      s = s.split('~');
-      if(!s || !(s = s[1])){ return }
-      s = s.split(pubcut).slice(0,2);
-      if(!s || 2 != s.length){ return }
+      s = s.split('~')[1]
+      if(!s){ return }
       if('@' === (s[0]||'')[0]){ return }
-      s = s.slice(0,2).join('.');
-      return s;
+      // New format: 88 alphanumeric chars (base62)
+      if(/^[A-Za-z0-9]{88}/.test(s)){ return s.slice(0, 88) }
+      // Old format: x.y (base64url, 87 chars) — backward compat for check.pub routing
+      var parts = s.split(pubcut).slice(0,2)
+      if(!parts || 2 !== parts.length){ return }
+      return parts.slice(0,2).join('.')
     }
     SEA.opt.stringy = function(t){
       // TODO: encrypt etc. need to check string primitive. Make as breaking change.

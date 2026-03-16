@@ -125,7 +125,10 @@ Gun.ask = require('./ask');
 
 		var now = State(), u;
 		if(state > now){
-			setTimeout(function(){ ham(val, key, soul, state, msg) }, (tmp = state - now) > MD? MD : tmp); // Max Defer 32bit. :(
+			if((tmp = state - now) > Ham.max){
+				msg.err = ctx.err = ERR+cut(key)+"on"+cut(soul)+"state too far in future."; fire(ctx); back(ctx); return;
+			}
+			setTimeout(function(){ ham(val, key, soul, state, msg) }, tmp > MD? MD : tmp); // Max Defer 32bit. :(
 			console.STAT && console.STAT(((DBG||ctx).Hf = +new Date), tmp, 'future');
 			return;
 		}
@@ -155,7 +158,7 @@ Gun.ask = require('./ask');
 	}
 	function fire(ctx, msg){ var root;
 		if(ctx.stop){ return }
-		if(!ctx.err && 0 < --ctx.stun){ return } // TODO: 'forget' feature in SEA tied to this, bad approach, but hacked in for now. Any changes here must update there.
+		if(0 < --ctx.stun && !ctx.err){ return } // decrement always runs; early-return only if stun still positive AND no error.
 		ctx.stop = 1;
 		if(!(root = ctx.root)){ return }
 		var tmp = ctx.match; tmp.end = 1;
@@ -187,13 +190,14 @@ Gun.ask = require('./ask');
 	}
 	function back(ctx){
 		if(!ctx || !ctx.root){ return }
-		if(ctx.stun || ctx.acks !== ctx.all){ return }
+		if(ctx.stun || (ctx.acks||0) !== ctx.all){ return } // normalize acks: undefined treated as 0 before first storage ack arrives.
 		ctx.root.on('in', {'@': ctx['#'], err: ctx.err, ok: ctx.err? u : ctx.ok || {'':1}});
 	}
 
 	var ERR = "Error: Invalid graph!";
 	var cut = function(s){ return " '"+(''+s).slice(0,9)+"...' " }
 	var L = JSON.stringify, MD = 2147483647, State = Gun.state;
+	var Ham = ham; Ham.max = 1000 * 60 * 60 * 24 * 7; // 1 week: legit clock skew is seconds, not days.
 	var C = 0, CT, CF = function(){if(C>999 && (C/-(CT - (CT = +new Date))>1)){Gun.window && console.log("Warning: You're syncing 1K+ records a second, faster than DOM can update - consider limiting query.");CF=function(){C=0}}};
 
 }());
@@ -301,6 +305,7 @@ Gun.log = function(){ return (!Gun.log.off && C.log.apply(C, arguments)), [].sli
 Gun.log.once = function(w,s,o){ return (o = Gun.log.once)[w] = o[w] || 0, o[w]++ || Gun.log(s) };
 
 ((typeof globalThis !== "undefined" && typeof window === "undefined" && typeof WorkerGlobalScope !== "undefined") ? ((globalThis.GUN = globalThis.Gun = Gun).window = globalThis) : (typeof window !== "undefined" ? ((window.GUN = window.Gun = Gun).window = window) : undefined));
+((globalThis.GUN = globalThis.Gun = Gun).globalThis = globalThis);
 try{ if(typeof MODULE !== "undefined"){ MODULE.exports = Gun } }catch(e){}
 module.exports = Gun;
 

@@ -99,6 +99,73 @@ describe('SEA', function(){
       });});});});});});});});
     })
 
+    it('work() base64url no slash', function(done){
+      this.timeout(60 * 1000);
+      (async function(){
+        function randStr(len){
+          var chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+          var out = '';
+          for(var i = 0; i < len; i++){
+            out += chars.charAt(Math.floor(Math.random() * chars.length));
+          }
+          return out;
+        }
+        function workAsync(data){
+          return new Promise(function(res){
+            SEA.work(data, null, function(r){ res(r) }, {name: 'SHA-256'});
+          });
+        }
+        for(var i = 0; i < 1000; i++){
+          var s = randStr(32);
+          var r = await workAsync(s);
+          if(r.indexOf('/') >= 0){
+            throw new Error('Found "/" in work() output at index '+i+': '+r+' (input: '+s+')');
+          }
+        }
+        done();
+      })().catch(function(err){ done(err || new Error('work() base64url test failed')); });
+    })
+
+    it('btoa/atob utf8 roundtrip', function(done){
+      (async function(){
+        var TextEnc = typeof TextEncoder !== 'undefined' ? TextEncoder : require('util').TextEncoder;
+        var TextDec = typeof TextDecoder !== 'undefined' ? TextDecoder : require('util').TextDecoder;
+        var enc = new TextEnc();
+        var dec = new TextDec('utf-8');
+
+        function toBinaryString(str){
+          var bytes = enc.encode(str);
+          var bin = '';
+          for(var i = 0; i < bytes.length; i++){
+            bin += String.fromCharCode(bytes[i]);
+          }
+          return bin;
+        }
+
+        function fromBinaryString(bin){
+          var bytes = new Uint8Array(bin.length);
+          for(var i = 0; i < bin.length; i++){
+            bytes[i] = bin.charCodeAt(i);
+          }
+          return dec.decode(bytes);
+        }
+
+        var samples = [
+          'Tiếng Việt có dấu: ắềôữ đặng',
+          '中文測試：漢字とかな',
+          'Emoji 😀🔥✨'
+        ];
+
+        samples.forEach(function(s){
+          var bin = toBinaryString(s);
+          var b64 = btoa(bin);
+          var round = fromBinaryString(atob(b64));
+          expect(round).to.be(s);
+        });
+        done();
+      })().catch(function(err){ done(err || new Error('btoa/atob utf8 test failed')); });
+    })
+
     it('types', function(done){
       var pair, s, v;
       SEA.pair(function(pair){
@@ -203,28 +270,29 @@ describe('SEA', function(){
 
     it('hash array buffer', function(done) {
       (async function() {
-        // Create a random ArrayBuffer (buffer 1)
+        // Create a deterministic ArrayBuffer (buffer 1)
         var buff1 = new ArrayBuffer(16);
         var view1 = new Uint8Array(buff1); // Use a Uint8Array to modify the buffer
         for (var i = 0; i < view1.length; i++) {
-          view1[i] = Math.floor(Math.random() * 256);
+          view1[i] = i;
         }
         var hash1 = await SEA.work(buff1, "salt");
-    
-        // Create another random ArrayBuffer (buffer 2)
+
+        // Create another deterministic ArrayBuffer (buffer 2)
         var buff2 = new ArrayBuffer(16);
         var view2 = new Uint8Array(buff2);
         for (var i = 0; i < view2.length; i++) {
-          view2[i] = Math.floor(Math.random() * 256);
+          view2[i] = i + 16;
         }
         var hash2 = await SEA.work(buff2, "salt");
-    
+
         // Ensure the hashes are strings and different from each other
-        expect(typeof hash1 === "string" && typeof hash2 === "string" && hash1 !== hash2).to.be(true);
+        expect(typeof hash1 === "string" && typeof hash2 === "string").to.be(true);
+        expect(hash1 !== hash2).to.be(true);
         done(); // Signal that the test is complete
       })();
     });
-    
+
     it('legacy', function(done){ (async function(){
       var pw = 'test123';
       // https://cdn.jsdelivr.net/npm/gun@0.9.99999/sea.js !
@@ -250,7 +318,7 @@ describe('SEA', function(){
         done();
       });
     }())});
-    
+
     it('legacy []', function(done){ (async function(){
       var pw = 'test123';
       // https://cdn.jsdelivr.net/npm/gun@0.9.99999/sea.js !
@@ -313,6 +381,62 @@ describe('SEA', function(){
       expect(dup).to.not.be.eql(sig);
       done();
     }())})
+  });
+
+  describe('pair() key format', function() {
+    var B62 = /^[A-Za-z0-9]{88}$/;
+    var B62_44 = /^[A-Za-z0-9]{44}$/;
+
+    it('pub is 88-char base62 (no dot, dash, underscore)', async function() {
+      var pair = await SEA.pair();
+      expect(pair.pub).to.be.a('string');
+      expect(pair.pub.length).to.be(88);
+      expect(B62.test(pair.pub)).to.be(true);
+    });
+
+    it('epub is 88-char base62 (no dot, dash, underscore)', async function() {
+      var pair = await SEA.pair();
+      expect(pair.epub).to.be.a('string');
+      expect(pair.epub.length).to.be(88);
+      expect(B62.test(pair.epub)).to.be(true);
+    });
+
+    it('priv is 44-char base62', async function() {
+      var pair = await SEA.pair();
+      expect(pair.priv).to.be.a('string');
+      expect(pair.priv.length).to.be(44);
+      expect(B62_44.test(pair.priv)).to.be(true);
+    });
+
+    it('epriv is 44-char base62', async function() {
+      var pair = await SEA.pair();
+      expect(pair.epriv).to.be.a('string');
+      expect(pair.epriv.length).to.be(44);
+      expect(B62_44.test(pair.epriv)).to.be(true);
+    });
+
+    it('pub and epub differ (ECDSA vs ECDH keys)', async function() {
+      var pair = await SEA.pair();
+      expect(pair.pub).to.not.be(pair.epub);
+    });
+
+    it('format holds across multiple independent pairs', async function() {
+      var pairs = await Promise.all([SEA.pair(), SEA.pair(), SEA.pair()]);
+      pairs.forEach(function(p) {
+        expect(B62.test(p.pub)).to.be(true);
+        expect(B62.test(p.epub)).to.be(true);
+        expect(B62_44.test(p.priv)).to.be(true);
+        expect(B62_44.test(p.epriv)).to.be(true);
+      });
+    });
+
+    it('seed-based pair has same format', async function() {
+      var pair = await SEA.pair(null, { seed: 'test-seed-format' });
+      expect(B62.test(pair.pub)).to.be(true);
+      expect(B62.test(pair.epub)).to.be(true);
+      expect(B62_44.test(pair.priv)).to.be(true);
+      expect(B62_44.test(pair.epriv)).to.be(true);
+    });
   });
 
   describe('Seed-based Key Generation', function() {
@@ -734,6 +858,275 @@ describe('SEA', function(){
       }, {opt: {authenticator: authenticator}})
     })()});
 
+    it("put to user graph deep with authenticator", function(done){(async function(){
+      var bob = await SEA.pair();
+      var encrypted = await SEA.encrypt('secret', bob);
+      gun.get(`~${bob.pub}`).get('a').get('b').put(encrypted, (ack) => {
+        gun.get(`~${bob.pub}`).get('a').get('b').once((data) => {
+          expect(ack.err).to.not.be.ok()
+          expect(data).to.be(encrypted)
+          done();
+        })
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("accepts shard intermediate when link target matches child soul", function(done){(async function(){
+      var bob = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      var expected = '~/' + key;
+      gun.get('~').get(key).put({'#': expected}, function(ack){
+        expect(ack.err).to.not.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("rejects shard intermediate when link target mismatches child soul", function(done){(async function(){
+      var bob = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      gun.get('~').get(key).put({'#': '~/zz'}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("rejects shard intermediate when value is not link", function(done){
+      gun.get('~').get('ab').put('no-link', function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    });
+
+    it("accepts shard intermediate with external async authenticator", function(done){(async function(){
+      var bob = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      var expected = '~/' + key;
+      async function authenticator(data){ return SEA.sign(data, bob) }
+      gun.get('~').get(key).put({'#': expected}, function(ack){
+        expect(ack.err).to.not.be.ok();
+        done();
+      }, {opt: {authenticator: authenticator, pub: bob.pub}}) // function auth has no .pub — must pass opt.pub explicitly
+    })()});
+
+    it("rejects shard intermediate with function authenticator but missing opt.pub", function(done){(async function(){
+      var bob = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      var expected = '~/' + key;
+      async function authenticator(data){ return SEA.sign(data, bob) }
+      gun.get('~').get(key).put({'#': expected}, function(ack){
+        expect(ack.err).to.be.ok(); // claim = undefined without opt.pub → "Invalid shard intermediate pub."
+        done();
+      }, {opt: {authenticator: authenticator}}) // no opt.pub → claim undefined
+    })()});
+
+    it("rejects shard intermediate with state too far in future", function(done){(async function(){
+      var bob = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      var expected = '~/' + key;
+      // HAM.max is 1 week; inject a state 2 weeks in the future.
+      // HAM now rejects immediately with an error — ack.err is set before SEA runs.
+      var futureState = Gun.state() + (1000 * 60 * 60 * 24 * 14);
+      gun.get('~').get(key).put({'#': expected}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }, {state: futureState, opt: {authenticator: bob}});
+    })()});
+
+    it("rejects shard intermediate without authenticator", function(done){(async function(){
+      var bob = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      var expected = '~/' + key;
+      gun.get('~').get(key).put({'#': expected}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }) // no opt.authenticator
+    })()});
+
+    it("rejects shard intermediate with wrong pub prefix", function(done){(async function(){
+      var bob = await SEA.pair();
+      var alice = await SEA.pair();
+      var key = bob.pub.slice(0, 2);
+      while(alice.pub.slice(0, 2) === key){ alice = await SEA.pair() }
+      var expected = '~/' + key;
+      gun.get('~').get(key).put({'#': expected}, function(ack){
+        expect(ack.err).to.be.ok(); // alice.pub doesn't start with key
+        done();
+      }, {opt: {authenticator: alice}})
+    })()});
+
+    it("rejects shard write with invalid key length", function(done){
+      gun.get('~').get('abc').put({'#':'~/abc'}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    });
+
+    it("rejects shard write when depth exceeds limit", function(done){
+      var segs = Array(44).fill('ab');
+      var soul = '~/' + segs.join('/');
+      gun.get(soul).get('cd').put({'#': soul + '/cd'}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    });
+
+    it("rejects shard leaf when value is raw pub string", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      gun.get(soul).get(key).put(bob.pub, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    })()});
+
+    it("rejects shard leaf when value is null", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      gun.get(soul).get(key).put(null, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    })()});
+
+    it("rejects shard leaf when value is a number", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      gun.get(soul).get(key).put(42, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    })()});
+
+    it("rejects shard leaf when link points to wrong soul", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      gun.get(soul).get(key).put({'#': soul + '/' + key}, function(ack){
+        expect(ack.err).to.be.ok(); // link must point to ~pub not intermediate path
+        done();
+      })
+    })()});
+
+    it("rejects shard leaf without authenticator", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      gun.get(soul).get(key).put({'#': '~' + bob.pub}, function(ack){
+        expect(ack.err).to.be.ok(); // no authenticator — rejected
+        done();
+      })
+    })()});
+
+    it("put to shard leaf with authenticator pair", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      gun.get(soul).get(key).put({'#': '~' + bob.pub}, function(ack){
+        expect(ack.err).to.not.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("put to shard leaf with external authenticator", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var key = chunks.pop();
+      var soul = chunks.length ? '~/' + chunks.join('/') : '~';
+      async function authenticator(data){
+        return SEA.sign(data, bob)
+      }
+      gun.get(soul).get(key).put({'#': '~' + bob.pub}, function(ack){
+        expect(ack.err).to.not.be.ok();
+        done();
+      }, {opt: {authenticator: authenticator}})
+    })()});
+
+    it("full chain put: gun.get('~').get(c0)...get(cN).put({#:~pub}) registers full path", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      // Chain: gun.get('~').get(chunks[0]).get(chunks[1])...get(chunks[N]).put(leaf)
+      var node = gun.get('~');
+      for(var i = 0; i < chunks.length; i++){ node = node.get(chunks[i]) }
+      node.put({'#': '~' + bob.pub}, function(ack){
+        expect(ack.err).to.not.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("full chain put: rejects when no authenticator", function(done){(async function(){
+      var bob = await SEA.pair();
+      var chunks = bob.pub.match(/.{1,2}/g) || [];
+      var node = gun.get('~');
+      for(var i = 0; i < chunks.length; i++){ node = node.get(chunks[i]) }
+      node.put({'#': '~' + bob.pub}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }) // no authenticator
+    })()});
+
+    it("rejects shard path with double slash", function(done){
+      gun.get('~/ab//cd').get('ef').put({'#':'~/ab//cd/ef'}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    });
+
+    it("rejects shard path with trailing slash", function(done){
+      gun.get('~/ab/cd/').get('ef').put({'#':'~/ab/cd//ef'}, function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      })
+    });
+
+    it("rejects hash mismatch inside user graph (~pub)", function(done){(async function(){
+      var bob = await SEA.pair();
+      gun.get(`~${bob.pub}`).get('payload#deadbeef').put('hello world', function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("rejects hash mismatch at depth 2 under ~pub", function(done){(async function(){
+      var bob = await SEA.pair();
+      gun.get(`~${bob.pub}`).get('parent').get('payload#deadbeef').put('hello world', function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("rejects hash mismatch at depth 3 under ~pub", function(done){(async function(){
+      var bob = await SEA.pair();
+      gun.get(`~${bob.pub}`).get('parent').get('child').get('payload#deadbeef').put('hello world', function(ack){
+        expect(ack.err).to.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
+    it("does not leak authenticator on out", function(done){(async function(){
+      var g = Gun();
+      var bob = await SEA.pair();
+      g.on('out', function(msg){
+        if(msg.put){
+          var meta = msg._ || {};
+          expect(Object.prototype.propertyIsEnumerable.call(meta, 'sea')).to.be(false);
+          expect(((msg.opt||{}).authenticator)).to.not.be.ok();
+        }
+        this.to.next(msg);
+      });
+      g.get(`~${bob.pub}`).get('a').get('b').put('x', (ack) => {
+        expect(ack.err).to.not.be.ok();
+        done();
+      }, {opt: {authenticator: bob}})
+    })()});
+
     it('test', function(done){
       var g = Gun();
       user = g.user();
@@ -1097,6 +1490,48 @@ describe('SEA', function(){
           }, { opt: { cert } })
       })
     }())});
+
+    it('Certify: Deep content addressing write', function(done){(async function(){
+      var alice = await SEA.pair()
+      var bob = await SEA.pair()
+      var cert = await SEA.certify(bob, {"*": "private"}, alice)
+
+      var data = Gun.state().toString(36)
+      var fullHash = await SEA.work(data, null, null, {name: 'SHA-256'})
+      var hash = fullHash.slice(-20)
+
+      gun.get("~" + alice.pub)
+        .get("private")
+        .get("thread")
+        .get("message#" + hash)
+        .put(data, ack => {
+          expect(ack.err).to.not.be.ok()
+          gun.get("~" + alice.pub)
+            .get("private")
+            .get("thread")
+            .get("message#" + hash)
+            .once(_data => {
+              expect(_data).to.be(data)
+              done()
+            })
+        }, { opt: { cert, authenticator: bob } })
+    }())})
+
+    it('Certify: Deep content addressing reject mismatch', function(done){(async function(){
+      var alice = await SEA.pair()
+      var bob = await SEA.pair()
+      var cert = await SEA.certify(bob, {"*": "private"}, alice)
+      var data = Gun.state().toString(36)
+
+      gun.get("~" + alice.pub)
+        .get("private")
+        .get("thread")
+        .get("message#deadbeef")
+        .put(data, ack => {
+          expect(ack.err).to.be.ok()
+          done()
+        }, { opt: { cert, authenticator: bob } })
+    }())})
 
     it('Certify: Expiry', function(done){(async function(){
       var alice = await SEA.pair()
