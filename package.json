@@ -1,5 +1,5 @@
 {
-  "name": "@akaoio/gun",
+  "name": "@scobru/gun",
   "version": "0.2020.1241",
   "description": "A realtime, decentralized, offline-first, graph data synchronization engine.",
   "types": "index.d.ts",
