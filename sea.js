@@ -65,13 +65,13 @@
       return;
     }
     if(native.btoa){
-      root.btoa = function(data){ return native.btoa(data).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); };
+      root.btoa = function(data){ return native.btoa.call(root, data).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, ''); };
     }
     if(native.atob){
       root.atob = function(data){
         var tmp = data.replace(/-/g, '+').replace(/_/g, '/')
         while(tmp.length % 4){ tmp += '=' }
-        return native.atob(tmp);
+        return native.atob.call(root, tmp);
       };
     }
   })(USE, './base64');
