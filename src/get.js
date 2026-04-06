@@ -83,7 +83,6 @@ Gun.chain.get = function(key, cb, as){
 			if(root.pass){ if(root.pass[id+at.id]){ return } root.pass[id+at.id] = 1 }
 			if(opt.on){ opt.ok.call(at.$, data, at.get, msg, eve || any); return } // TODO: Also consider breaking `this` since a lot of people do `=>` these days and `.call(` has slower performance.
 			if(opt.v2020){ opt.ok(msg, eve || any); return }
-			Object.keys(msg).forEach(function(k){ tmp[k] = msg[k] }, tmp = {}); msg = tmp; msg.put = data; // 2019 COMPATIBILITY! TODO: GET RID OF THIS!
 			opt.ok.call(opt.as, msg, eve || any); // is this the right
 		};
 		any.at = cat;
