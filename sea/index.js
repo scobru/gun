@@ -460,7 +460,7 @@
       return parts.slice(0,2).join('.')
     }
     SEA.opt.stringy = function(t){
-      // TODO: encrypt etc. need to check string primitive. Make as breaking change.
+      if('string' != typeof t){ throw "String primitive required." }
     }
     SEA.opt.pack = function(d,cb,k, n,s){ var tmp, f; // pack for verifying
       if(SEA.opt.check(d)){ return cb(d) }

@@ -1078,6 +1078,7 @@
 
     SEA.encrypt = SEA.encrypt || (async (data, pair, cb, opt) => { try {
       opt = opt || {};
+      SEA.opt.stringy(data);
       var key = (pair||opt).epriv || pair;
       if(u === data){ throw '`undefined` not allowed.' }
       if(!key){
@@ -1085,7 +1086,7 @@
         pair = await SEA.I(null, {what: data, how: 'encrypt', why: opt.why});
         key = pair.epriv || pair;
       }
-      var msg = (typeof data == 'string')? data : await shim.stringify(data);
+      var msg = data;
       var rand = {s: shim.random(9), iv: shim.random(15)}; // consider making this 9 and 15 or 18 or 12 to reduce == padding.
       var ct = await aeskey(key, rand.s, opt).then((aes) => (/*shim.ossl ||*/ shim.subtle).encrypt({ // Keeping the AES key scope as private as possible...
         name: opt.name || 'AES-GCM', iv: new Uint8Array(rand.iv)
@@ -1457,7 +1458,7 @@
       }
       act.e = function(){
         act.data.epub = act.pair.epub; 
-        SEA.encrypt({priv: act.pair.priv, epriv: act.pair.epriv}, act.proof, act.f, {raw:1}); // to keep the private key safe, we AES encrypt it with the proof of work!
+        SEA.encrypt(JSON.stringify({priv: act.pair.priv, epriv: act.pair.epriv}), act.proof, act.f, {raw:1}); // to keep the private key safe, we AES encrypt it with the proof of work!
       }
       act.f = function(auth){
         act.data.auth = JSON.stringify({ek: auth, s: act.salt}); 
@@ -1637,7 +1638,7 @@
         SEA.work(opt.change, act.salt, act.y);
       }
       act.y = function(proof){
-        SEA.encrypt({priv: act.pair.priv, epriv: act.pair.epriv}, proof, act.x, {raw:1});
+        SEA.encrypt(JSON.stringify({priv: act.pair.priv, epriv: act.pair.epriv}), proof, act.x, {raw:1});
       }
       act.x = function(auth){
         act.w(JSON.stringify({ek: auth, s: act.salt}));
@@ -2314,7 +2315,7 @@
       return parts.slice(0,2).join('.')
     }
     SEA.opt.stringy = function(t){
-      // TODO: encrypt etc. need to check string primitive. Make as breaking change.
+      if('string' != typeof t){ throw "String primitive required." }
     }
     SEA.opt.pack = function(d,cb,k, n,s){ var tmp, f; // pack for verifying
       if(SEA.opt.check(d)){ return cb(d) }

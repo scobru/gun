@@ -62,7 +62,7 @@
       }
       act.e = function(){
         act.data.epub = act.pair.epub; 
-        SEA.encrypt({priv: act.pair.priv, epriv: act.pair.epriv}, act.proof, act.f, {raw:1}); // to keep the private key safe, we AES encrypt it with the proof of work!
+        SEA.encrypt(JSON.stringify({priv: act.pair.priv, epriv: act.pair.epriv}), act.proof, act.f, {raw:1}); // to keep the private key safe, we AES encrypt it with the proof of work!
       }
       act.f = function(auth){
         act.data.auth = JSON.stringify({ek: auth, s: act.salt}); 

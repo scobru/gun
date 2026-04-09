@@ -137,7 +137,7 @@
         SEA.work(opt.change, act.salt, act.y);
       }
       act.y = function(proof){
-        SEA.encrypt({priv: act.pair.priv, epriv: act.pair.epriv}, proof, act.x, {raw:1});
+        SEA.encrypt(JSON.stringify({priv: act.pair.priv, epriv: act.pair.epriv}), proof, act.x, {raw:1});
       }
       act.x = function(auth){
         act.w(JSON.stringify({ek: auth, s: act.salt}));
