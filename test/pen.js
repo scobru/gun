@@ -90,6 +90,13 @@ describe('pen.run — ISA', function() {
     assert.strictEqual(run(prog(bc.eq(bc.r0(), bc.str('mykey'))), ['other']), false);
   });
 
+  it('EQ supports comparing two dynamic expressions', function() {
+    var bc = pen.bc;
+    var bytecode = prog(bc.eq(bc.seg(bc.r0(), ':', bc.intn(1)), bc.r5()));
+    assert.strictEqual(run(bytecode, ['123:writerpub:nonce', '', '', 0, Date.now(), 'writerpub']), true);
+    assert.strictEqual(run(bytecode, ['123:otherpub:nonce', '', '', 0, Date.now(), 'writerpub']), false);
+  });
+
   it('PRE (startsWith)', function() {
     var bc = pen.bc;
     assert.strictEqual(run(prog(bc.pre(bc.r0(), bc.str('foo'))), ['foobar']), true);
@@ -266,6 +273,52 @@ describe('SEA.pen()', function() {
     assert.strictEqual(pen.run(bc, ['bar',        'v', soul, 0, Date.now(), '']), false);
   });
 
+  it('{ path: "exact" } enforces exact path match', function() {
+    var soul = SEA.pen({ path: 'exact-path' });
+    var bc = pen.unpack(soul.slice(1));
+    var regs = function(p) { return ['k', 'v', soul, 0, Date.now(), '', p]; };
+    assert.strictEqual(pen.run(bc, regs('exact-path')), true);
+    assert.strictEqual(pen.run(bc, regs('other-path')), false);
+    assert.strictEqual(pen.run(bc, regs('')),           false);
+  });
+
+  it('{ path: { pre: "usr/" } } checks path prefix', function() {
+    var soul = SEA.pen({ path: { pre: 'usr/' } });
+    var bc = pen.unpack(soul.slice(1));
+    var regs = function(p) { return ['k', 'v', soul, 0, Date.now(), '', p]; };
+    assert.strictEqual(pen.run(bc, regs('usr/alice')),  true);
+    assert.strictEqual(pen.run(bc, regs('usr/')),       true);
+    assert.strictEqual(pen.run(bc, regs('admin/alice')), false);
+  });
+
+  it('{ path: { type: "string" } } accepts non-empty path, rejects missing path', function() {
+    var soul = SEA.pen({ path: { type: 'string' } });
+    var bc = pen.unpack(soul.slice(1));
+    assert.strictEqual(pen.run(bc, ['k', 'v', soul, 0, Date.now(), '', 'some/path']), true);
+    assert.strictEqual(pen.run(bc, ['k', 'v', soul, 0, Date.now(), '', '']),          true);  // empty string is still string
+    assert.strictEqual(pen.run(bc, ['k', 'v', soul, 0, Date.now(), '', null]),        false);
+  });
+
+  it('path + key + val: all three combine with AND', function() {
+    var soul = SEA.pen({
+      key:  { type: 'string' },
+      val:  { type: 'number' },
+      path: { pre: 'ns/' }
+    });
+    var bc = pen.unpack(soul.slice(1));
+    assert.strictEqual(pen.run(bc, ['k', 42,    soul, 0, Date.now(), '', 'ns/foo']),  true,  'all match');
+    assert.strictEqual(pen.run(bc, ['k', 'str', soul, 0, Date.now(), '', 'ns/foo']),  false, 'val wrong type');
+    assert.strictEqual(pen.run(bc, ['k', 42,    soul, 0, Date.now(), '', 'other/']),  false, 'path wrong prefix');
+  });
+
+  it('path seg: validate first segment of path', function() {
+    var soul = SEA.pen({ path: { seg: { sep: '/', idx: 0, match: { pre: 'user-' } } } });
+    var bc = pen.unpack(soul.slice(1));
+    var regs = function(p) { return ['k', 'v', soul, 0, Date.now(), '', p]; };
+    assert.strictEqual(pen.run(bc, regs('user-123/data')), true);
+    assert.strictEqual(pen.run(bc, regs('admin-1/data')), false);
+  });
+
   it('multiple fields combine with AND', function() {
     var soul = SEA.pen({ key: { type: 'string' }, val: { type: 'number' } });
     var bc = pen.unpack(soul.slice(1));
@@ -298,13 +351,65 @@ describe('SEA.pen()', function() {
     assert.strictEqual(pen.scanpolicy(bc).open, true);
   });
 
-  it('{ pow: { field:1, difficulty:3 } } emits 0xC4 + field + diff', function() {
+  it('{ pow: { field:1, difficulty:3 } } emits 0xC4 + field + diff, unit defaults to "0"', function() {
     var soul = SEA.pen({ pow: { field: 1, difficulty: 3 } });
     var bc = pen.unpack(soul.slice(1));
     var p = pen.scanpolicy(bc);
     assert.ok(p.pow);
     assert.strictEqual(p.pow.field, 1);
     assert.strictEqual(p.pow.difficulty, 3);
+    assert.strictEqual(p.pow.unit, '0', 'unit defaults to "0" when not specified');
+  });
+
+  it('{ pow: { unit: "asdf", difficulty: 2 } } unit and difficulty round-trip', function() {
+    var soul = SEA.pen({ pow: { field: 0, unit: 'asdf', difficulty: 2 } });
+    var bc = pen.unpack(soul.slice(1));
+    var p = pen.scanpolicy(bc);
+    assert.ok(p.pow);
+    assert.strictEqual(p.pow.unit, 'asdf');
+    assert.strictEqual(p.pow.difficulty, 2);
+    assert.strictEqual(p.pow.field, 0);
+  });
+
+  it('{ pow: { unit: "abc" } } difficulty defaults to 1', function() {
+    var soul = SEA.pen({ pow: { field: 0, unit: 'abc' } });
+    var bc = pen.unpack(soul.slice(1));
+    var p = pen.scanpolicy(bc);
+    assert.ok(p.pow);
+    assert.strictEqual(p.pow.unit, 'abc');
+    assert.strictEqual(p.pow.difficulty, 1, 'difficulty defaults to 1 when not specified');
+  });
+
+  it('{ pow: { difficulty: 2 } } unit defaults to "0"', function() {
+    var soul = SEA.pen({ pow: { field: 0, difficulty: 2 } });
+    var bc = pen.unpack(soul.slice(1));
+    var p = pen.scanpolicy(bc);
+    assert.ok(p.pow);
+    assert.strictEqual(p.pow.unit, '0', 'unit defaults to "0" when omitted');
+    assert.strictEqual(p.pow.difficulty, 2);
+  });
+
+  it('{ params } salts soul identity and round-trips through scanpolicy', function() {
+    var soul = SEA.pen({
+      val: { type: 'string' },
+      params: { item: 'organic-green-tea', type: 'buy', candle: 5820000 }
+    });
+    var bc = pen.unpack(soul.slice(1));
+    var p = pen.scanpolicy(bc);
+    assert.deepStrictEqual(p.params, { candle: 5820000, item: 'organic-green-tea', type: 'buy' });
+    assert.strictEqual(pen.run(bc, ['k', 'hello', soul, 0, Date.now(), '']), true);
+  });
+
+  it('{ params } canonicalizes object key order before salting soul', function() {
+    var a = SEA.pen({ key: { type: 'string' }, params: { item: 'tea', type: 'buy', candle: 1 } });
+    var b = SEA.pen({ key: { type: 'string' }, params: { type: 'buy', candle: 1, item: 'tea' } });
+    assert.strictEqual(a, b);
+  });
+
+  it('different params produce different souls even when validator is identical', function() {
+    var a = SEA.pen({ key: { type: 'string' }, params: { item: 'tea', type: 'buy', candle: 1 } });
+    var b = SEA.pen({ key: { type: 'string' }, params: { item: 'tea', type: 'buy', candle: 2 } });
+    assert.notStrictEqual(a, b);
   });
 
   it('sign + predicate: policy detected without polluting tree', function() {
@@ -385,6 +490,7 @@ describe('pen.scanpolicy()', function() {
     assert.strictEqual(p.cert, null);
     assert.strictEqual(p.open, false);
     assert.strictEqual(p.pow, null);
+    assert.strictEqual(p.params, null);
   });
 
   it('detects multiple policies simultaneously', function() {
@@ -479,6 +585,33 @@ describe('penStage (mocked pipeline)', function() {
     done();
   });
 
+  it('soul with path: penStage extracts path after first / into R[6]', function(done) {
+    var soul = SEA.pen({ path: { pre: 'usr/' } });
+    // Simulate soul with path: '$pencode/usr/alice'
+    var soulWithPath = soul + '/usr/alice';
+    var slashIdx = soulWithPath.indexOf('/');
+    var pencode = soulWithPath.slice(1, slashIdx);
+    var pathpart = soulWithPath.slice(slashIdx + 1);  // 'usr/alice'
+    var bc = pen.unpack(pencode);
+    var regs = ['k', 'v', soulWithPath, 0, Date.now(), '', pathpart];
+    assert.strictEqual(pen.run(bc, regs), true,  'path prefix "usr/" accepted');
+
+    var regsWrong = ['k', 'v', soulWithPath, 0, Date.now(), '', 'admin/alice'];
+    assert.strictEqual(pen.run(bc, regsWrong), false, 'wrong path prefix rejected');
+    done();
+  });
+
+  it('soul without path: path R[6] defaults to empty string', function(done) {
+    var soul = SEA.pen({ key: 'mykey' });
+    // No slash in soul — path should be ''
+    var pencode = soul.slice(1);
+    var pathpart = '';
+    var bc = pen.unpack(pencode);
+    var regs = ['mykey', 'v', soul, 0, Date.now(), '', pathpart];
+    assert.strictEqual(pen.run(bc, regs), true, 'no-path soul still passes key predicate');
+    done();
+  });
+
   it('open policy: eve.to.next called without auth', function(done) {
     var soul = SEA.pen({ open: true });
     var r = mockCtx(soul, 'k', 'hello');
@@ -505,13 +638,14 @@ describe('penStage (mocked pipeline)', function() {
     done();
   });
 
-  it('pow policy: field and difficulty correctly extracted', function(done) {
+  it('pow policy: field, difficulty, and unit correctly extracted', function(done) {
     var soul = SEA.pen({ pow: { field: 1, difficulty: 4 } });
     var bc = pen.unpack(soul.slice(1));
     var policy = pen.scanpolicy(bc);
     assert.ok(policy.pow);
     assert.strictEqual(policy.pow.field, 1);
     assert.strictEqual(policy.pow.difficulty, 4);
+    assert.strictEqual(policy.pow.unit, '0', 'unit defaults to "0"');
     done();
   });
 
@@ -723,6 +857,33 @@ describe('SEA + PEN integration', function() {
     });
   });
 
+  it('pow unit:"a" difficulty:1 — SEA.work hash must start with "a"', function(done) {
+    this.timeout(30000);
+    var unit = 'a';
+    var difficulty = 1;
+    var prefix = unit.repeat(difficulty); // 'a'
+    var soul = SEA.pen({ pow: { field: 1, unit: unit, difficulty: difficulty } });
+    var bc = pen.unpack(soul.slice(1));
+    var policy = pen.scanpolicy(bc);
+    assert.strictEqual(policy.pow.unit, unit);
+    assert.strictEqual(policy.pow.difficulty, difficulty);
+
+    var tries = 0;
+    function seek(n) {
+      tries++;
+      if (tries > 500) return done(new Error('could not find PoW solution in 500 tries'));
+      var val = 'test_data_nonce' + n;
+      SEA.work(val, null, function(hash) {
+        if (hash && hash.slice(0, prefix.length) === prefix) {
+          assert.ok(hash.startsWith(prefix), 'hash satisfies unit.repeat(difficulty)');
+          assert.ok(pen.run(bc, ['k', val, soul, 0, Date.now(), '']), 'predicate passes (PASS, no constraint)');
+          done();
+        } else { seek(n + 1); }
+      }, { name: 'SHA-256', encode: 'hex' });
+    }
+    seek(0);
+  });
+
   it('order namespace: SEA.work PoW + candle — hostile nonce cannot fake PoW', function(done) {
     this.timeout(30000);
     var now = Date.now();
@@ -799,5 +960,44 @@ describe('SEA + PEN integration', function() {
     });
   });
 
-});
+  it('GUN shared PEN soul: authenticator pub is available in R[5] during predicate evaluation', function(done) {
+    this.timeout(10000);
+    var now = Date.now();
+    var size = 300000;
+    var candle = Math.floor(now / size);
+    var soul = SEA.pen({
+      key: { and: [
+        {
+          let: {
+            bind: 0,
+            def: { divu: [{ tonum: { seg: { sep: ':', idx: 0, of: { reg: 0 } } } }, size] },
+            body: { and: [
+              { gte: [{ reg: 128 }, candle] },
+              { lte: [{ reg: 128 }, candle] }
+            ]}
+          }
+        },
+        { eq: [
+          { seg: { sep: ':', idx: 1, of: { reg: 0 } } },
+          { reg: 5 }
+        ]},
+        { seg: { sep: ':', idx: 2, of: { reg: 0 }, match: { length: [1, 64] } } }
+      ]},
+      val: { type: 'string' },
+      sign: true,
+      params: { item: 'tea', type: 'buy', candle: candle }
+    });
+    var gun = Gun({ radisk: false, peers: [], localStorage: false });
+    var key = now + ':' + pair.pub + ':nonce1';
+    SEA.sign('shared_order', pair, function(value) {
+      gun.get(soul).get(key).put(value, function(ack) {
+        if (ack && ack.err) return done(new Error(ack.err));
+        gun.get(soul).get(key).once(function(v) {
+          assert.strictEqual(v, value, 'shared PEN write round-trips with authenticator pub in R[5]');
+          done();
+        });
+      }, { opt: { authenticator: pair } });
+    });
+  });
 
+});
